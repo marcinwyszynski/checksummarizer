@@ -32,10 +32,10 @@ func main() {
 		log.Panic("GITHUB_APP_PRIVATE_KEY not set")
 	}
 
-	// Get from the environment the ID of the app you want to spy on.
-	observedAppID, err := strconv.ParseInt(os.Getenv("OBSERVED_APP_ID"), 10, 64)
-	if err != nil {
-		log.Panicf("Error parsing OBSERVED_APP_ID: %v", err)
+	// Get from the environment the ID of the app installation you want to spy on.
+	observedAppName, ok := os.LookupEnv("OBSERVED_APP_NAME")
+	if !ok {
+		log.Panic("OBSERVED_APP_NAME not set")
 
 	}
 
@@ -53,11 +53,11 @@ func main() {
 	http.ListenAndServe(":8080", http.HandlerFunc(BuildHandler(
 		github.NewClient(&http.Client{Transport: transport}),
 		[]byte(secretToken),
-		observedAppID,
+		observedAppName,
 	)))
 }
 
-func BuildHandler(client *github.Client, secretToken []byte, observedAppID int64) http.HandlerFunc {
+func BuildHandler(client *github.Client, secretToken []byte, observedAppName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		payload, err := github.ValidatePayload(r, secretToken)
 		if err != nil {
@@ -75,7 +75,7 @@ func BuildHandler(client *github.Client, secretToken []byte, observedAppID int64
 
 		switch event := event.(type) {
 		case *github.CheckRunEvent:
-			if err := handleCheckRunEvent(r.Context(), client.Checks, event, observedAppID); err != nil {
+			if err := handleCheckRunEvent(r.Context(), client.Checks, event, observedAppName); err != nil {
 				log.Printf("Error handling check run event: %v", err)
 				http.Error(w, "Error handling check run event", http.StatusInternalServerError)
 			}
@@ -85,10 +85,10 @@ func BuildHandler(client *github.Client, secretToken []byte, observedAppID int64
 	}
 }
 
-func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, event *github.CheckRunEvent, observedAppID int64) error {
+func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, event *github.CheckRunEvent, observedAppName string) error {
 	// App not interesting, ignore.
-	if senderID := event.GetCheckRun().GetApp().GetID(); senderID != observedAppID {
-		log.Printf("Received check run event for ignored sender %d", senderID)
+	if appName := event.GetCheckRun().GetApp().GetName(); appName != observedAppName {
+		log.Printf("Received check run event for ignored app  %q", appName)
 		return nil
 	}
 
@@ -98,6 +98,7 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 		return nil
 	}
 
+	appID := event.GetCheckRun().GetApp().GetID()
 	commitSHA := event.GetCheckRun().GetHeadSHA()
 	owner := event.GetRepo().GetOwner().GetLogin()
 	repoName := event.GetRepo().GetName()
@@ -108,7 +109,7 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 		owner,
 		repoName,
 		commitSHA,
-		&github.ListCheckRunsOptions{AppID: &observedAppID},
+		&github.ListCheckRunsOptions{AppID: &appID},
 	)
 
 	if err != nil {
@@ -155,30 +156,28 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 
 	var titleParts []string
 	var summaryParts []string
-	if len(success) > 0 {
-		titleParts = append(titleParts, fmt.Sprintf("%d successful", len(success)))
-		summaryParts = append(summaryParts, "## Successful checks:")
-		for _, check := range success {
+
+	appendChecks := func(name string, collection []string) {
+		summaryParts = append(summaryParts, fmt.Sprintf("## %s:", name))
+		for _, check := range collection {
 			summaryParts = append(summaryParts, fmt.Sprintf("- %s", check))
 		}
 		summaryParts = append(summaryParts, "")
+	}
+
+	if len(success) > 0 {
+		titleParts = append(titleParts, fmt.Sprintf("%d successful", len(success)))
+		appendChecks("Successful checks", success)
 	}
 
 	if len(failure) > 0 {
 		titleParts = append(titleParts, fmt.Sprintf("%d failed", len(failure)))
-		summaryParts = append(summaryParts, "## Failed checks:")
-		for _, check := range failure {
-			summaryParts = append(summaryParts, fmt.Sprintf("- %s", check))
-		}
-		summaryParts = append(summaryParts, "")
+		appendChecks("Failed checks", failure)
 	}
 
 	if len(inProgress) > 0 {
 		titleParts = append(titleParts, fmt.Sprintf("%d in progress", len(inProgress)))
-		summaryParts = append(summaryParts, "## Checks in progress:")
-		for _, check := range inProgress {
-			summaryParts = append(summaryParts, fmt.Sprintf("- %s", check))
-		}
+		appendChecks("Checks in progress", inProgress)
 	}
 
 	title := strings.Join(titleParts, ", ")
