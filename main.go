@@ -74,7 +74,7 @@ func BuildHandler(client *github.Client, secretToken []byte, observedAppID int64
 
 		switch event := event.(type) {
 		case *github.CheckRunEvent:
-			if err := handleCheckRunEvent(r.Context(), client, event, observedAppID); err != nil {
+			if err := handleCheckRunEvent(r.Context(), client.Checks, event, observedAppID); err != nil {
 				log.Printf("Error handling check run event: %v", err)
 				http.Error(w, "Error handling check run event", http.StatusInternalServerError)
 			}
@@ -84,7 +84,7 @@ func BuildHandler(client *github.Client, secretToken []byte, observedAppID int64
 	}
 }
 
-func handleCheckRunEvent(ctx context.Context, client *github.Client, event *github.CheckRunEvent, observedAppID int64) error {
+func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, event *github.CheckRunEvent, observedAppID int64) error {
 	// App not interesting, ignore.
 	if senderID := event.GetCheckRun().GetApp().GetID(); senderID != observedAppID {
 		log.Printf("Received check run event for ignored sender %d", senderID)
@@ -102,7 +102,7 @@ func handleCheckRunEvent(ctx context.Context, client *github.Client, event *gith
 	repoName := event.GetRepo().GetName()
 
 	// List check runs for the commit.
-	result, response, err := client.Checks.ListCheckRunsForRef(
+	result, response, err := service.ListCheckRunsForRef(
 		ctx,
 		owner,
 		repoName,
@@ -155,7 +155,7 @@ func handleCheckRunEvent(ctx context.Context, client *github.Client, event *gith
 	checkName := "Check Run Aggregator"
 	summary := fmt.Sprintf("Success: %d, Failure: %d, In Progress: %d", successCount, failureCount, inProgressCount)
 
-	_, response, err = client.Checks.CreateCheckRun(
+	_, response, err = service.CreateCheckRun(
 		ctx,
 		owner,
 		repoName,
