@@ -80,7 +80,7 @@ func BuildHandler(client *github.Client, secretToken []byte, observedAppName str
 				http.Error(w, "Error handling check run event", http.StatusInternalServerError)
 			}
 		default:
-			log.Printf("Received event of type %s", github.WebHookType(r))
+			log.Printf("Received event of ignored type %q", github.WebHookType(r))
 		}
 	}
 }
@@ -88,13 +88,17 @@ func BuildHandler(client *github.Client, secretToken []byte, observedAppName str
 func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, event *github.CheckRunEvent, observedAppName string) error {
 	// App not interesting, ignore.
 	if appName := event.GetCheckRun().GetApp().GetName(); appName != observedAppName {
-		log.Printf("Received check run event for ignored app  %q", appName)
+		log.Printf("Received check run event for ignored app %q", appName)
 		return nil
 	}
 
+	checkStatus := event.GetCheckRun().GetStatus()
+	checkName := event.GetCheckRun().GetName()
+	checkConclusion := event.GetCheckRun().GetConclusion()
+
 	// The check has not finished yet, nothing to do.
-	if event.CheckRun.GetConclusion() == "" {
-		log.Printf("No conclusion for check run %d", event.GetCheckRun().GetID())
+	if checkConclusion == "" {
+		log.Printf("No conclusion yet for %s check run %s", checkStatus, checkName)
 		return nil
 	}
 
@@ -102,6 +106,8 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 	commitSHA := event.GetCheckRun().GetHeadSHA()
 	owner := event.GetRepo().GetOwner().GetLogin()
 	repoName := event.GetRepo().GetName()
+
+	log.Printf("Received check run event for %s check run %s with conclusion %s", checkStatus, checkName, checkConclusion)
 
 	// List check runs for the commit.
 	result, response, err := service.ListCheckRunsForRef(
@@ -120,21 +126,30 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 		return fmt.Errorf("error listing check runs for commit %s: %d", commitSHA, response.StatusCode)
 	}
 
-	var success, failure, inProgress []string
+	type check struct {
+		name, detailsURL string
+	}
+
+	var success, failure, inProgress []check
 
 	for _, checkRun := range result.CheckRuns {
+		check := check{
+			name:       checkRun.GetName(),
+			detailsURL: checkRun.GetDetailsURL(),
+		}
+
 		switch checkRun.GetStatus() {
 		case "completed":
 			switch checkRun.GetConclusion() {
 			case "failure", "cancelled", "stale", "timed_out":
-				failure = append(failure, checkRun.GetName())
+				failure = append(failure, check)
 			case "action_required":
-				inProgress = append(inProgress, checkRun.GetName())
+				inProgress = append(inProgress, check)
 			default:
-				success = append(success, checkRun.GetName())
+				success = append(success, check)
 			}
 		default:
-			inProgress = append(inProgress, checkRun.GetName())
+			inProgress = append(inProgress, check)
 		}
 	}
 
@@ -157,10 +172,10 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 	var titleParts []string
 	var summaryParts []string
 
-	appendChecks := func(name string, collection []string) {
+	appendChecks := func(name string, collection []check) {
 		summaryParts = append(summaryParts, fmt.Sprintf("## %s:", name))
 		for _, check := range collection {
-			summaryParts = append(summaryParts, fmt.Sprintf("- %s", check))
+			summaryParts = append(summaryParts, fmt.Sprintf("- [%s](%s);", check.name, check.detailsURL))
 		}
 		summaryParts = append(summaryParts, "")
 	}
@@ -188,7 +203,7 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 		owner,
 		repoName,
 		github.CreateCheckRunOptions{
-			Name:       "Synthetic status",
+			Name:       fmt.Sprintf("Synthetic status for %s", observedAppName),
 			HeadSHA:    commitSHA,
 			Status:     &status,
 			Conclusion: conclusion,
