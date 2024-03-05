@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v57/github"
@@ -26,7 +27,7 @@ func main() {
 	}
 
 	// Get the secret token from the environment.
-	secretToken, ok := os.LookupEnv("GITHUB_APP_PRIVATE_KEY")
+	secretToken, ok := os.LookupEnv("GITHUB_APP_SECRET_TOKEN")
 	if !ok {
 		log.Panic("GITHUB_APP_PRIVATE_KEY not set")
 	}
@@ -118,29 +119,29 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 		return fmt.Errorf("error listing check runs for commit %s: %d", commitSHA, response.StatusCode)
 	}
 
-	var successCount, failureCount, inProgressCount int
+	var success, failure, inProgress []string
 
 	for _, checkRun := range result.CheckRuns {
 		switch checkRun.GetStatus() {
 		case "completed":
 			switch checkRun.GetConclusion() {
 			case "failure", "cancelled", "stale", "timed_out":
-				failureCount++
+				failure = append(failure, checkRun.GetName())
 			case "action_required":
-				inProgressCount++
+				inProgress = append(inProgress, checkRun.GetName())
 			default:
-				successCount++
+				success = append(success, checkRun.GetName())
 			}
 		default:
-			inProgressCount++
+			inProgress = append(inProgress, checkRun.GetName())
 		}
 	}
 
 	var status, conclusionStr string
-	if failureCount > 0 {
+	if len(failure) > 0 {
 		status = "completed"
 		conclusionStr = "failure"
-	} else if inProgressCount > 0 {
+	} else if len(inProgress) > 0 {
 		status = "in_progress"
 	} else {
 		status = "completed"
@@ -152,20 +153,48 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 		conclusion = &conclusionStr
 	}
 
-	checkName := "Check Run Aggregator"
-	summary := fmt.Sprintf("Success: %d, Failure: %d, In Progress: %d", successCount, failureCount, inProgressCount)
+	var titleParts []string
+	var summaryParts []string
+	if len(success) > 0 {
+		titleParts = append(titleParts, fmt.Sprintf("%d successful", len(success)))
+		summaryParts = append(summaryParts, "## Successful checks:")
+		for _, check := range success {
+			summaryParts = append(summaryParts, fmt.Sprintf("- %s", check))
+		}
+		summaryParts = append(summaryParts, "")
+	}
+
+	if len(failure) > 0 {
+		titleParts = append(titleParts, fmt.Sprintf("%d failed", len(failure)))
+		summaryParts = append(summaryParts, "## Failed checks:")
+		for _, check := range failure {
+			summaryParts = append(summaryParts, fmt.Sprintf("- %s", check))
+		}
+		summaryParts = append(summaryParts, "")
+	}
+
+	if len(inProgress) > 0 {
+		titleParts = append(titleParts, fmt.Sprintf("%d in progress", len(inProgress)))
+		summaryParts = append(summaryParts, "## Checks in progress:")
+		for _, check := range inProgress {
+			summaryParts = append(summaryParts, fmt.Sprintf("- %s", check))
+		}
+	}
+
+	title := strings.Join(titleParts, ", ")
+	summary := strings.Join(summaryParts, "\n")
 
 	_, response, err = service.CreateCheckRun(
 		ctx,
 		owner,
 		repoName,
 		github.CreateCheckRunOptions{
-			Name:       checkName,
+			Name:       "Synthetic status",
 			HeadSHA:    commitSHA,
 			Status:     &status,
 			Conclusion: conclusion,
 			Output: &github.CheckRunOutput{
-				Title:   &checkName,
+				Title:   &title,
 				Summary: &summary,
 			},
 		},
