@@ -102,11 +102,11 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 		return nil
 	}
 
-	appID := event.GetCheckRun().GetApp().GetID()
 	commitSHA := event.GetCheckRun().GetHeadSHA()
 	owner := event.GetRepo().GetOwner().GetLogin()
 	repoName := event.GetRepo().GetName()
 
+	// We have something interesting now, let the user know.
 	log.Printf("Received check run event for %s check run %s with conclusion %s", checkStatus, checkName, checkConclusion)
 
 	// List check runs for the commit.
@@ -115,7 +115,7 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 		owner,
 		repoName,
 		commitSHA,
-		&github.ListCheckRunsOptions{AppID: &appID},
+		&github.ListCheckRunsOptions{AppID: event.GetCheckRun().GetApp().ID},
 	)
 
 	if err != nil {
@@ -123,20 +123,15 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 	}
 
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("error listing check runs for commit %s: %d", commitSHA, response.StatusCode)
+		return fmt.Errorf("unexpected status code when listing check runs for commit %s: %d", commitSHA, response.StatusCode)
 	}
 
-	type check struct {
-		name, detailsURL string
-	}
+	type check struct{ name, detailsURL string }
 
 	var success, failure, inProgress []check
 
 	for _, checkRun := range result.CheckRuns {
-		check := check{
-			name:       checkRun.GetName(),
-			detailsURL: checkRun.GetDetailsURL(),
-		}
+		check := check{checkRun.GetName(), checkRun.GetDetailsURL()}
 
 		switch checkRun.GetStatus() {
 		case "completed":
@@ -153,50 +148,41 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 		}
 	}
 
-	var status, conclusionStr string
+	status := "completed"
+	var conclusion *string
+
 	if len(failure) > 0 {
-		status = "completed"
-		conclusionStr = "failure"
+		conclusion = nullable("failure")
 	} else if len(inProgress) > 0 {
 		status = "in_progress"
 	} else {
-		status = "completed"
-		conclusionStr = "success"
+		conclusion = nullable("success")
 	}
 
-	var conclusion *string
-	if conclusionStr != "" {
-		conclusion = &conclusionStr
-	}
+	var titleElements, summaryElements []string
 
-	var titleParts []string
-	var summaryParts []string
-
-	appendChecks := func(name string, collection []check) {
-		summaryParts = append(summaryParts, fmt.Sprintf("## %s:", name))
-		for _, check := range collection {
-			summaryParts = append(summaryParts, fmt.Sprintf("- [%s](%s);", check.name, check.detailsURL))
+	appendChecks := func(name string, checks []check) {
+		summaryElements = append(summaryElements, fmt.Sprintf("## %s:", name))
+		for _, check := range checks {
+			summaryElements = append(summaryElements, fmt.Sprintf("- [%s](%s);", check.name, check.detailsURL))
 		}
-		summaryParts = append(summaryParts, "")
+		summaryElements = append(summaryElements, "")
 	}
 
 	if len(success) > 0 {
-		titleParts = append(titleParts, fmt.Sprintf("%d successful", len(success)))
+		titleElements = append(titleElements, fmt.Sprintf("%d successful", len(success)))
 		appendChecks("Successful checks", success)
 	}
 
 	if len(failure) > 0 {
-		titleParts = append(titleParts, fmt.Sprintf("%d failed", len(failure)))
+		titleElements = append(titleElements, fmt.Sprintf("%d failed", len(failure)))
 		appendChecks("Failed checks", failure)
 	}
 
 	if len(inProgress) > 0 {
-		titleParts = append(titleParts, fmt.Sprintf("%d in progress", len(inProgress)))
+		titleElements = append(titleElements, fmt.Sprintf("%d in progress", len(inProgress)))
 		appendChecks("Checks in progress", inProgress)
 	}
-
-	title := strings.Join(titleParts, ", ")
-	summary := strings.Join(summaryParts, "\n")
 
 	_, response, err = service.CreateCheckRun(
 		ctx,
@@ -205,11 +191,11 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 		github.CreateCheckRunOptions{
 			Name:       fmt.Sprintf("Synthetic status for %s", observedAppName),
 			HeadSHA:    commitSHA,
-			Status:     &status,
+			Status:     nullable(status),
 			Conclusion: conclusion,
 			Output: &github.CheckRunOutput{
-				Title:   &title,
-				Summary: &summary,
+				Title:   nullable(strings.Join(titleElements, ", ")),
+				Summary: nullable(strings.Join(summaryElements, "\n")),
 			},
 		},
 	)
@@ -219,8 +205,13 @@ func handleCheckRunEvent(ctx context.Context, service *github.ChecksService, eve
 	}
 
 	if response.StatusCode != http.StatusCreated {
-		return fmt.Errorf("error creating check run for commit %s: %d", commitSHA, response.StatusCode)
+		return fmt.Errorf("unexpected status code when creating check run for commit %s: %d", commitSHA, response.StatusCode)
 	}
 
 	return nil
+}
+
+func nullable[T any](value T) *T {
+	v := value
+	return &v
 }
